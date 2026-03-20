@@ -1,0 +1,19 @@
+{
+  "bank_name": "Mellat Bank",
+  "bank_name_en": "MellatBank",
+  "website": "https://mellatbank.am",
+  "category": "branches",
+  "source_url": "https://mellatbank.am",
+  "scraped_at": "2026-03-19T15:10:27.530374",
+  "total_branches": 1,
+  "branches": [
+    {
+      "name": "Mellat Bank - Glkhamasnavorutyun",
+      "address": "ք. Երևան, Չարենցի 19",
+      "phone": "(374) 60 38 88 88",
+      "schedule": "",
+      "extended_hours": false,
+      "description": null
+    }
+  ]
+}

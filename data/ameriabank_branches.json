@@ -1,0 +1,155 @@
+{
+  "bank_name": "Ամերիաբանկ",
+  "bank_name_en": "Ameriabank",
+  "website": "https://ameriabank.am",
+  "category": "branches",
+  "source_url": "https://ameriabank.am/service-network",
+  "scraped_at": "2026-03-19T16:07:09.583072",
+  "total_branches": 18,
+  "branches": [
+    {
+      "name": "Պրեմիում սրահ – Գլխամաս",
+      "address": "ՀՀ, ք. Երևան, 0010, Վազգեն Սարգսյան 2",
+      "phone": "+374 10 56 1111",
+      "schedule": "Ստանդարտ գրաֆիկով",
+      "extended_hours": false,
+      "description": null
+    },
+    {
+      "name": "«Կամար» մ/ճ",
+      "address": "ՀՀ, ք. Երևան, 0010, Վազգեն Սարգսյան 2, «Կամար» բիզնես կենտրոնի 1-ին հարկ",
+      "phone": "+374 10 56 1111",
+      "schedule": "Ստանդարտ գրաֆիկով",
+      "extended_hours": false,
+      "description": null
+    },
+    {
+      "name": "«Մաշտոց» մ/ճ",
+      "address": "ՀՀ, ք. Երևան, 0082, Մաշտոցի պող. 20/4, Անցում N1",
+      "phone": "+374 10 56 1111",
+      "schedule": "Երկարացված գրաֆիկով",
+      "extended_hours": true,
+      "description": null
+    },
+    {
+      "name": "«Մոսկովյան» մ/ճ",
+      "address": "ՀՀ, ք. Երևան, 0002, Մաշտոցի պող. 48, 2/1 տարածք",
+      "phone": "+374 10 56 1111",
+      "schedule": "Ստանդարտ գրաֆիկով",
+      "extended_hours": false,
+      "description": null
+    },
+    {
+      "name": "«Երիտասարդական» մ/ճ",
+      "address": "ՀՀ, ք. Երևան, 0009, Իսահակյան 22/8",
+      "phone": "+374 10 56 1111",
+      "schedule": "Երկարացված գրաֆիկով",
+      "extended_hours": true,
+      "description": null
+    },
+    {
+      "name": "«Սայաթ-Նովա» մ/ճ",
+      "address": "ՀՀ, ք. Երևան, 0001, Սայաթ-Նովա 8 շենք, 47 տարածք",
+      "phone": "+374 10 56 1111",
+      "schedule": "Ստանդարտ գրաֆիկով",
+      "extended_hours": false,
+      "description": null
+    },
+    {
+      "name": "«Դալմա» մ/ճ",
+      "address": "ՀՀ, ք. Երևան, 0082, Ծիծեռնակաբերդի խճուղի 3, «Դալմա Գարդեն Մոլ» առևտրի կենտրոն",
+      "phone": "+374 10 56 1111",
+      "schedule": "Երկարացված գրաֆիկով",
+      "extended_hours": true,
+      "description": null
+    },
+    {
+      "name": "«Կոմիտաս» մ/ճ",
+      "address": "ՀՀ, ք. Երևան, 0033, Կոմիտաս 12, շ. 1021",
+      "phone": "+374 10 56 1111",
+      "schedule": "Ստանդարտ գրաֆիկով",
+      "extended_hours": false,
+      "description": null
+    },
+    {
+      "name": "«Քոչար» մ/ճ",
+      "address": "ՀՀ, ք. Երևան, 0012, Փափազյան 8, «Ռիո Մոլ» առևտրի կենտրոն",
+      "phone": "+374 10 56 1111",
+      "schedule": "Երկարացված գրաֆիկով",
+      "extended_hours": true,
+      "description": null
+    },
+    {
+      "name": "Զեյթուն մ/ճ",
+      "address": "ՀՀ, ք. Երևան, Հ. Ներսիսյան փ. 1 շենք, 127",
+      "phone": "+374 10 56 1111",
+      "schedule": "Ստանդարտ գրաֆիկով",
+      "extended_hours": false,
+      "description": null
+    },
+    {
+      "name": "«Էրեբունի» մ/ճ",
+      "address": "ՀՀ, ք. Երևան, Էրեբունի փ. 17/1",
+      "phone": "+374 10 56 1111",
+      "schedule": "Երկարացված գրաֆիկով",
+      "extended_hours": true,
+      "description": null
+    },
+    {
+      "name": "«Արշակունյաց» մ/ճ",
+      "address": "ՀՀ, ք. Երևան, 0026, Արշակունյաց 34/3, «Երևան Մոլ» առևտրի կենտրոն, 2-րդ հարկ",
+      "phone": "+374 10 56 1111",
+      "schedule": "Երկարացված գրաֆիկով",
+      "extended_hours": true,
+      "description": null
+    },
+    {
+      "name": "«Շենգավիթ» մ/ճ",
+      "address": "ՀՀ, ք. Երևան, 0046, Բագրատունյաց 18 շենք, 112 տարածք",
+      "phone": "+374 10 56 1111",
+      "schedule": "Ստանդարտ գրաֆիկով",
+      "extended_hours": false,
+      "description": null
+    },
+    {
+      "name": "«Նոր Նորք» մ/ճ",
+      "address": "ՀՀ, ք. Երևան, 0056, Գայի պողոտա 16, «Մեգամոլ» առևտրի կենտրոն",
+      "phone": "+374 10 56 1111",
+      "schedule": "Երկարացված գրաֆիկով",
+      "extended_hours": true,
+      "description": null
+    },
+    {
+      "name": "Մալաթիա մ/ճ",
+      "address": "ՀՀ, Երևան ք., Մալաթիա-Սեբաստիա վարչական շրջան, Զ. Անդրանիկի փող. 40/4",
+      "phone": "+374 10 56 1111",
+      "schedule": "Ստանդարտ գրաֆիկով",
+      "extended_hours": false,
+      "description": null
+    },
+    {
+      "name": "Ավան մ/ճ",
+      "address": "ՀՀ, ք. Երևան, Խուդյակով 175/1",
+      "phone": "+374 10 56 1111",
+      "schedule": "Ստանդարտ գրաֆիկով",
+      "extended_hours": false,
+      "description": null
+    },
+    {
+      "name": "Դավթաշեն մ/ճ",
+      "address": "ՀՀ, ք. Երևան, Դավթաշեն 3-րդ թաղամաս, Տիգրան Պետրոսյան փող., 25/5 շենք, «Երևան Սիթի» առևտրի կենտրոն",
+      "phone": "+374 10 56 1111",
+      "schedule": "Երկարացված գրաֆիկով",
+      "extended_hours": true,
+      "description": null
+    },
+    {
+      "name": "Աջափնյակ մ/ճ",
+      "address": "Մազմանյան 1, Գարաժ մաստերս մոլ",
+      "phone": "+374 10 56 1111",
+      "schedule": "Երկարացված գրաֆիկով",
+      "extended_hours": true,
+      "description": null
+    }
+  ]
+}
