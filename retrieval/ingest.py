@@ -1,14 +1,11 @@
 """
 RAG Knowledge Base Builder.
 
-Loads scraped bank data (JSON), chunks it intelligently,
-generates embeddings with a multilingual model, and stores
-everything in a ChromaDB collection.
-
-Run once after scraping, or re-run when data changes.
+Loads scraped bank data (JSON), chunks it, embeds via OpenAI API,
+and stores everything in ChromaDB for retrieval.
 
 Usage:
-    python -m rag.ingest --data-dir data --db-dir chroma_db
+python -m retrieval.ingest --data-dir data --db-dir chroma_db
 """
 
 import argparse
@@ -16,407 +13,397 @@ import glob
 import json
 import os
 import re
+import time
 import uuid
-from typing import Optional
+import logging
+from collections import Counter
 
 import chromadb
-from chromadb.config import Settings
-from sentence_transformers import SentenceTransformer
+from dotenv import load_dotenv
+from openai import OpenAI
 
+logger = logging.getLogger("retrieval.ingest")
 
-# ── Configuration ────────────────────────────────────────────────────────────
+# Configuration
 
-EMBEDDING_MODEL = "intfloat/multilingual-e5-small"
+EMBEDDING_MODEL = "text-embedding-3-large"
 COLLECTION_NAME = "bank_knowledge"
-CHUNK_MAX_CHARS = 1500  # Target max per chunk
-CHUNK_OVERLAP_CHARS = 150  # Overlap between split chunks
-BRANCH_GROUP_SIZE = 4  # Branches per chunk
+CHUNK_MAX_CHARS = 400
+CHUNK_OVERLAP_CHARS = 150
+BRANCH_GROUP_SIZE = 1
+EMBED_BATCH_SIZE = 100
+MAX_EMBED_CHARS = 800  # Safety truncation before embedding
 
 
-# ── Chunking Logic ───────────────────────────────────────────────────────────
 
-def chunk_product_page(content: str, title: str, bank: str, category: str,
-                       product_key: str, url: str) -> list[dict]:
-    """
-    Chunk a product page (loan or deposit) into retrieval-friendly pieces.
+class TextChunker:
+    """Splits scraped bank content into retrieval-friendly chunks."""
 
-    Strategy:
-    1. Split by [SectionName] markers (from scraper output)
-    2. If a section exceeds CHUNK_MAX_CHARS, split further at paragraph boundaries
-    3. Prepend context header to each chunk so it's self-contained
-    """
-    # Context line prepended to every chunk for self-containment
-    header = f"Բանկ: {bank} | {title}"
+    def __init__(self, max_chars=CHUNK_MAX_CHARS, overlap=CHUNK_OVERLAP_CHARS):
+        self.max_chars = max_chars
+        self.overlap = overlap
 
-    # Split by section markers like [Summary], [Overview], [FAQ], etc.
-    section_pattern = r'\[([^\]]+)\]'
-    sections = re.split(section_pattern, content)
+    def chunk_product_page(self, content, title, bank, category,
+                           product_key, url):
+        """Split a product page by [SectionName] markers from scraper output."""
+        if not content.strip():
+            return []
 
-    chunks = []
+        header = f"Bank: {bank} | {title}"
+        section_pattern = r'\[([^\]]+)\]'
+        sections = re.split(section_pattern, content)
 
-    # sections alternates: [text_before_first_marker, marker1, text1, marker2, text2, ...]
-    # If content starts with a marker, sections[0] is empty
-    i = 0
-    if sections and not sections[0].strip():
-        i = 1  # Skip empty leading text
+        chunks = []
+        i = 0
 
-    # Handle any text before the first section marker
-    if sections and sections[0].strip() and not re.match(section_pattern, '[' + sections[0] + ']'):
-        pre_text = sections[0].strip()
-        if pre_text:
-            chunks.extend(
-                _split_text(pre_text, header, bank, category, product_key,
-                            title, url, "General")
-            )
-        i = 1
+        # Text before first section marker
+        if sections and sections[0].strip():
+            if not re.match(r'\[.+\]', sections[0]):
+                chunks.extend(self._split(sections[0].strip(), header, bank, category,product_key, title, url, "General"))
+            i = 1
+        elif sections and not sections[0].strip():
+            i = 1
 
-    # Process section pairs: (marker, text)
-    while i < len(sections) - 1:
-        section_name = sections[i].strip()
-        section_text = sections[i + 1].strip() if i + 1 < len(sections) else ""
-        i += 2
+        # Process (marker, text) pairs
+        while i < len(sections) - 1:
+            section_name = sections[i].strip()
+            section_text = sections[i + 1].strip() if i + 1 < len(sections) else ""
+            i += 2
 
-        if not section_text:
-            continue
+            if not section_text:
+                continue
 
-        section_header = f"{header} | {section_name}"
-        chunks.extend(
-            _split_text(section_text, section_header, bank, category,
-                        product_key, title, url, section_name)
-        )
+            section_header = f"{header} | {section_name}"
+            chunks.extend(self._split(
+                section_text, section_header, bank, category,
+                product_key, title, url, section_name
+            ))
 
-    # If no sections were found (no markers), chunk the whole content
-    if not chunks and content.strip():
-        chunks.extend(
-            _split_text(content.strip(), header, bank, category,
-                        product_key, title, url, "General")
-        )
+        # Fallback: no markers found
+        if not chunks and content.strip():
+            chunks.extend(self._split(
+                content.strip(), header, bank, category,
+                product_key, title, url, "General"
+            ))
 
-    return chunks
+        return chunks
 
-
-def _split_text(text: str, header: str, bank: str, category: str,
-                product_key: str, title: str, url: str,
-                section: str) -> list[dict]:
-    """
-    Split text into chunks of CHUNK_MAX_CHARS with overlap.
-    Falls back from paragraph → sentence → hard char split.
-    Returns list of chunk dicts with text and metadata.
-    """
-    meta = {
-        "bank": bank,
-        "category": category,
-        "product_key": product_key,
-        "title": title,
-        "section": section,
-        "url": url,
-    }
-
-    # If short enough, return as single chunk
-    full_text = f"{header}\n\n{text}"
-    if len(full_text) <= CHUNK_MAX_CHARS:
-        return [{"text": full_text, "metadata": dict(meta)}]
-
-    # Try splitting at paragraph boundaries first, then sentences
-    paragraphs = text.split("\n\n")
-    # If only one big paragraph, split further by sentences
-    if len(paragraphs) <= 1:
-        # Split on sentence endings (. ? ! followed by space or newline)
-        sentences = re.split(r'(?<=[.!?])\s+', text)
-        units = sentences
-    else:
-        units = paragraphs
-
-    chunks = []
-    current = ""
-    header_len = len(header) + 2  # +2 for "\n\n"
-
-    for unit in units:
-        test_len = header_len + len(current) + 2 + len(unit) if current else header_len + len(unit)
-        if test_len > CHUNK_MAX_CHARS and current:
-            chunks.append({"text": f"{header}\n\n{current}", "metadata": dict(meta)})
-            # Keep overlap
-            if len(current) > CHUNK_OVERLAP_CHARS:
-                current = current[-CHUNK_OVERLAP_CHARS:] + "\n\n" + unit
-            else:
-                current = unit
-        else:
-            current = f"{current}\n\n{unit}" if current else unit
-
-    # Last chunk
-    if current.strip():
-        final = f"{header}\n\n{current}"
-        # If still too long (single giant sentence), hard-split by chars
-        if len(final) > CHUNK_MAX_CHARS * 2:
-            body = current
-            while body:
-                cut = CHUNK_MAX_CHARS - header_len - 10
-                piece = body[:cut]
-                body = body[cut:]
-                chunks.append({"text": f"{header}\n\n{piece}", "metadata": dict(meta)})
-        else:
-            chunks.append({"text": final, "metadata": dict(meta)})
-
-    return chunks
-
-
-def chunk_branches(branches: list, bank: str, bank_name: str,
-                   source_url: str) -> list[dict]:
-    """
-    Chunk branch data into groups of BRANCH_GROUP_SIZE.
-    Each chunk contains formatted branch info.
-    """
-    chunks = []
-
-    for i in range(0, len(branches), BRANCH_GROUP_SIZE):
-        group = branches[i:i + BRANCH_GROUP_SIZE]
-
-        lines = [f"Բանկ: {bank_name} | Մասնաճյուdelays"]
-        for b in group:
+    def chunk_branches(self, branches, bank, bank_name, source_url):
+        """One chunk per branch for precise retrieval."""
+        chunks = []
+        for i, b in enumerate(branches):
+            lines = [f"Bank: {bank_name} | Branches"]
             lines.append(f"\n{b['name']}")
-            lines.append(f"  Հdelays: {b['address']}")
+            lines.append(f"  Address: {b['address']}")
             if b.get('phone'):
-                lines.append(f"  Հeraxos: {b['phone']}")
+                lines.append(f"  Phone: {b['phone']}")
             if b.get('schedule'):
-                lines.append(f"  Grafik: {b['schedule']}")
+                lines.append(f"  Hours: {b['schedule']}")
             if b.get('description'):
                 lines.append(f"  Note: {b['description']}")
 
-        chunk_text = "\n".join(lines)
-        chunks.append({
-            "text": chunk_text,
-            "metadata": {
-                "bank": bank,
-                "category": "branches",
-                "product_key": "branches",
-                "title": f"{bank_name} branches ({i+1}-{i+len(group)})",
-                "section": "branches",
-                "url": source_url,
-            }
-        })
+            chunks.append({
+                "text": "\n".join(lines),
+                "metadata": {
+                    "bank": bank,
+                    "category": "branches",
+                    "product_key": "branches",
+                    "title": f"{bank_name} branch: {b['name']}",
+                    "section": "branches",
+                    "url": source_url,
+                }
+            })
+        return chunks
 
-    return chunks
+    def _split(self, text, header, bank, category,
+               product_key, title, url, section):
+        """Split text into chunks. Falls back: paragraph -> sentence -> hard cut."""
+        meta = {
+            "bank": bank, "category": category, "product_key": product_key,
+            "title": title, "section": section, "url": url,
+        }
 
+        full_text = f"{header}\n\n{text}"
+        if len(full_text) <= self.max_chars:
+            return [{"text": full_text, "metadata": dict(meta)}]
 
-# ── Data Loading ─────────────────────────────────────────────────────────────
+        # Try paragraphs first, then sentences
+        paragraphs = text.split("\n\n")
+        units = paragraphs if len(paragraphs) > 1 else re.split(r'(?<=[.!?])\s+', text)
 
-def load_product_json(filepath: str) -> list[dict]:
-    """Load a product JSON file and return chunks."""
-    with open(filepath, "r", encoding="utf-8") as f:
-        data = json.load(f)
+        chunks = []
+        current = ""
+        header_len = len(header) + 2
 
-    bank_en = data.get("bank_name_en", "Unknown")
-    bank_name = data.get("bank_name", bank_en)
-    category = data.get("category", "unknown")
-    pages = data.get("pages", {})
+        for unit in units:
+            test_len = header_len + len(current) + 2 + len(unit) if current else header_len + len(unit)
 
-    all_chunks = []
-    for key, page_data in pages.items():
-        content = page_data.get("content", "")
-        if not content or len(content) < 30:
-            continue
-
-        title = page_data.get("title", key)
-        url = page_data.get("url", "")
-
-        page_chunks = chunk_product_page(
-            content=content,
-            title=title,
-            bank=bank_en.lower().replace(" ", "_"),
-            category=category,
-            product_key=key,
-            url=url,
-        )
-        all_chunks.extend(page_chunks)
-
-    return all_chunks
-
-
-def load_branches_json(filepath: str) -> list[dict]:
-    """Load a branches JSON file and return chunks."""
-    with open(filepath, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    bank_en = data.get("bank_name_en", "Unknown")
-    bank_name = data.get("bank_name", bank_en)
-    branches = data.get("branches", [])
-    source_url = data.get("source_url", "")
-
-    if not branches:
-        return []
-
-    return chunk_branches(
-        branches=branches,
-        bank=bank_en.lower().replace(" ", "_"),
-        bank_name=bank_name,
-        source_url=source_url,
-    )
-
-
-def load_all_data(data_dir: str) -> list[dict]:
-    """
-    Load all scraped JSON files from the data directory.
-    Auto-detects product files (*_loans.json, *_deposits.json) and
-    branch files (*_branches.json).
-    """
-    all_chunks = []
-
-    json_files = glob.glob(os.path.join(data_dir, "*.json"))
-    if not json_files:
-        print(f"No JSON files found in {data_dir}")
-        return []
-
-    for filepath in sorted(json_files):
-        filename = os.path.basename(filepath)
-        print(f"Loading: {filename}")
-
-        try:
-            if "_branches" in filename:
-                chunks = load_branches_json(filepath)
-            elif "_loans" in filename or "_deposits" in filename:
-                chunks = load_product_json(filepath)
+            if test_len > self.max_chars and current:
+                chunks.append({"text": f"{header}\n\n{current}", "metadata": dict(meta)})
+                # Keep overlap for context continuity
+                if len(current) > self.overlap:
+                    current = current[-self.overlap:] + "\n\n" + unit
+                else:
+                    current = unit
             else:
-                print(f"  Skipping unknown file: {filename}")
+                current = f"{current}\n\n{unit}" if current else unit
+
+        # Remaining text
+        if current.strip():
+            final = f"{header}\n\n{current}"
+            if len(final) > self.max_chars * 2:
+                # Hard split for very long single sentences
+                body = current
+                while body:
+                    cut = self.max_chars - header_len - 10
+                    piece = body[:cut]
+                    body = body[cut:]
+                    chunks.append({"text": f"{header}\n\n{piece}", "metadata": dict(meta)})
+            else:
+                chunks.append({"text": final, "metadata": dict(meta)})
+
+        return chunks
+
+
+class BankDataLoader:
+    """Loads scraped JSON files and converts them to chunks."""
+
+    def __init__(self, data_dir, chunker=None):
+        self.data_dir = data_dir
+        self.chunker = chunker or TextChunker()
+
+    def load_all(self):
+        """Auto-detect and load all bank JSON files from data directory."""
+        all_chunks = []
+        json_files = sorted(glob.glob(os.path.join(self.data_dir, "*.json")))
+
+        if not json_files:
+            logger.warning(f"No JSON files found in {self.data_dir}")
+            return []
+
+        logger.info(f"Found {len(json_files)} JSON files")
+
+        for filepath in json_files:
+            filename = os.path.basename(filepath)
+            size_kb = os.path.getsize(filepath) / 1024
+
+            try:
+                if "_branches" in filename:
+                    chunks = self._load_branches(filepath)
+                elif "_loans" in filename or "_deposits" in filename:
+                    chunks = self._load_products(filepath)
+                else:
+                    logger.debug(f"Skipping unknown file: {filename}")
+                    continue
+
+                logger.info(f"  {filename} ({size_kb:.0f} KB) -> {len(chunks)} chunks")
+                all_chunks.extend(chunks)
+
+            except Exception as e:
+                logger.error(f"  Failed to load {filename}: {e}")
+
+        return all_chunks
+
+    def _load_products(self, filepath):
+        """Load a loans/deposits JSON and chunk each page."""
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        bank = data.get("bank_name_en", "Unknown").lower().replace(" ", "_")
+        category = data.get("category", "unknown")
+        chunks = []
+
+        for key, page in data.get("pages", {}).items():
+            content = page.get("content", "")
+            if not content or len(content) < 30:
                 continue
 
-            print(f"  → {len(chunks)} chunks")
-            all_chunks.extend(chunks)
+            page_chunks = self.chunker.chunk_product_page(
+                content=content,
+                title=page.get("title", key),
+                bank=bank,
+                category=category,
+                product_key=key,
+                url=page.get("url", ""),
+            )
+            chunks.extend(page_chunks)
 
-        except Exception as e:
-            print(f"  Error loading {filename}: {e}")
+        return chunks
 
-    return all_chunks
+    def _load_branches(self, filepath):
+        """Load a branches JSON and chunk each branch."""
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        bank = data.get("bank_name_en", "Unknown").lower().replace(" ", "_")
+        bank_name = data.get("bank_name", data.get("bank_name_en", "Unknown"))
+        branches = data.get("branches", [])
+
+        if not branches:
+            return []
+
+        return self.chunker.chunk_branches(
+            branches=branches,
+            bank=bank,
+            bank_name=bank_name,
+            source_url=data.get("source_url", ""),
+        )
 
 
-# ── ChromaDB Storage ─────────────────────────────────────────────────────────
+class OpenAIEmbedder:
+    """Generates embeddings via OpenAI API."""
 
-def build_knowledge_base(data_dir: str, db_dir: str,
-                         model_name: str = EMBEDDING_MODEL):
-    """
-    Main ingestion pipeline:
-    1. Load all scraped JSON
-    2. Chunk into retrieval-friendly pieces
-    3. Embed with multilingual model
-    4. Store in ChromaDB
-    """
-    print(f"\n{'='*60}")
-    print(f"Building RAG Knowledge Base")
-    print(f"{'='*60}")
-    print(f"Data dir:   {data_dir}")
-    print(f"DB dir:     {db_dir}")
-    print(f"Embed model: {model_name}")
-    print(f"{'='*60}\n")
+    def __init__(self, model=EMBEDDING_MODEL, batch_size=EMBED_BATCH_SIZE):
+        self.client = OpenAI()
+        self.model = model
+        self.batch_size = batch_size
 
-    # 1. Load and chunk all data
-    chunks = load_all_data(data_dir)
-    if not chunks:
-        print("No data to ingest. Run scrapers first.")
-        return
+    def embed_chunks(self, chunks):
+        """Embed all chunks, returns list of embedding vectors."""
+        # Safety truncation for token limit
+        texts = []
+        for c in chunks:
+            text = c["text"]
+            if len(text) > MAX_EMBED_CHARS:
+                text = text[:MAX_EMBED_CHARS] + "..."
+                c["text"] = text
+            texts.append(text)
 
-    print(f"\nTotal chunks: {len(chunks)}")
+        all_embeddings = []
+        total = len(texts)
 
-    # 2. Load embedding model
-    print(f"\nLoading embedding model: {model_name}")
-    model = SentenceTransformer(model_name)
+        for i in range(0, total, self.batch_size):
+            batch = texts[i:i + self.batch_size]
+            try:
+                response = self.client.embeddings.create(model=self.model, input=batch)
+                batch_embeddings = [item.embedding for item in response.data]
+                all_embeddings.extend(batch_embeddings)
+                logger.info(f"  Embedded {i + len(batch)}/{total} chunks")
+            except Exception as e:
+                logger.error(f"  Embedding failed at batch {i // self.batch_size + 1}: {e}")
+                raise
 
-    # 3. Generate embeddings
-    # multilingual-e5 requires "query: " or "passage: " prefix
-    texts = [f"passage: {c['text']}" for c in chunks]
-    print(f"Generating embeddings for {len(texts)} chunks...")
-    embeddings = model.encode(texts, show_progress_bar=True, batch_size=16)
-    print(f"Embedding dim: {embeddings.shape[1]}")
+            if i + self.batch_size < total:
+                time.sleep(0.2)
 
-    # 4. Store in ChromaDB
-    print(f"\nStoring in ChromaDB at {db_dir}")
-    client = chromadb.PersistentClient(path=db_dir)
+        logger.info(f"  Embedding dim: {len(all_embeddings[0])}")
+        return all_embeddings
 
-    # Delete existing collection if re-ingesting
-    try:
-        client.delete_collection(COLLECTION_NAME)
-        print(f"  Deleted existing collection '{COLLECTION_NAME}'")
-    except Exception:
-        pass
 
-    collection = client.create_collection(
-        name=COLLECTION_NAME,
-        metadata={"hnsw:space": "cosine"},
+class KnowledgeBaseBuilder:
+    """Orchestrates the full ingestion pipeline: load -> chunk -> embed -> store."""
+
+    def __init__(self, data_dir, db_dir, model=EMBEDDING_MODEL):
+        self.data_dir = data_dir
+        self.db_dir = db_dir
+        self.loader = BankDataLoader(data_dir)
+        self.embedder = OpenAIEmbedder(model=model)
+
+    def build(self):
+        """Run the full pipeline."""
+        logger.info("=" * 60)
+        logger.info("Building RAG Knowledge Base")
+        logger.info(f"  Data dir:    {self.data_dir}")
+        logger.info(f"  DB dir:      {self.db_dir}")
+        logger.info(f"  Embed model: {self.embedder.model}")
+        logger.info("=" * 60)
+
+        # Step 1: Load and chunk
+        logger.info("STEP 1: Loading and chunking data...")
+        chunks = self.loader.load_all()
+        if not chunks:
+            logger.error("No data found. Run scrapers first.")
+            return
+        logger.info(f"Total chunks: {len(chunks)}")
+
+        # Step 2: Embed
+        logger.info("STEP 2: Generating embeddings...")
+        embeddings = self.embedder.embed_chunks(chunks)
+
+        # Step 3: Store in ChromaDB
+        logger.info("STEP 3: Storing in ChromaDB...")
+        self._store(chunks, embeddings)
+
+        # Summary
+        self._print_summary(chunks)
+
+    def _store(self, chunks, embeddings):
+        """Write chunks + embeddings to ChromaDB."""
+        db_client = chromadb.PersistentClient(path=self.db_dir)
+
+        # Drop old collection if re-ingesting
+        try:
+            db_client.delete_collection(COLLECTION_NAME)
+            logger.info("  Deleted old collection")
+        except Exception:
+            pass
+
+        collection = db_client.create_collection(
+            name=COLLECTION_NAME,
+            metadata={"hnsw:space": "cosine"},
+        )
+
+        # Add in batches
+        batch_size = 500
+        for i in range(0, len(chunks), batch_size):
+            end = min(i + batch_size, len(chunks))
+            collection.add(
+                ids=[str(uuid.uuid4()) for _ in chunks[i:end]],
+                documents=[c["text"] for c in chunks[i:end]],
+                embeddings=embeddings[i:end],
+                metadatas=[c["metadata"] for c in chunks[i:end]],
+            )
+            logger.info(f"  Stored {end}/{len(chunks)} chunks")
+
+        logger.info("=" * 60)
+        logger.info(f"DONE! {collection.count()} chunks stored at {self.db_dir}")
+        logger.info("=" * 60)
+
+    @staticmethod
+    def _print_summary(chunks):
+        """Log chunk counts by bank and category."""
+        counts = Counter()
+        for c in chunks:
+            m = c["metadata"]
+            counts[(m["bank"], m["category"])] += 1
+
+        logger.info("Breakdown:")
+        for (bank, cat), count in sorted(counts.items()):
+            logger.info(f"  {bank}/{cat}: {count} chunks")
+
+
+def setup_logging():
+    """Configure logging to both console and file."""
+    os.makedirs("logs", exist_ok=True)
+
+    formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
     )
 
-    # Add in batches (ChromaDB limit)
-    batch_size = 500
-    for i in range(0, len(chunks), batch_size):
-        batch_end = min(i + batch_size, len(chunks))
-        batch_chunks = chunks[i:batch_end]
-        batch_embeddings = embeddings[i:batch_end].tolist()
+    # Console handler
+    console = logging.StreamHandler()
+    console.setFormatter(formatter)
 
-        ids = [str(uuid.uuid4()) for _ in batch_chunks]
-        documents = [c["text"] for c in batch_chunks]
-        metadatas = [c["metadata"] for c in batch_chunks]
+    # File handler
+    file_handler = logging.FileHandler("logs/ingest.log", encoding="utf-8")
+    file_handler.setFormatter(formatter)
 
-        collection.add(
-            ids=ids,
-            documents=documents,
-            embeddings=batch_embeddings,
-            metadatas=metadatas,
-        )
-        print(f"  Added batch {i//batch_size + 1}: {len(batch_chunks)} chunks")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(console)
+    root.addHandler(file_handler)
 
-    print(f"\n{'='*60}")
-    print(f"Knowledge base built successfully!")
-    print(f"  Total chunks: {collection.count()}")
-    print(f"  Collection: {COLLECTION_NAME}")
-    print(f"  Stored at: {db_dir}")
-    print(f"{'='*60}")
-
-    # Print summary by bank and category
-    _print_summary(chunks)
-
-
-def _print_summary(chunks: list[dict]):
-    """Print a summary of ingested data."""
-    from collections import Counter
-
-    bank_counts = Counter()
-    cat_counts = Counter()
-    bank_cat = Counter()
-
-    for c in chunks:
-        m = c["metadata"]
-        bank_counts[m["bank"]] += 1
-        cat_counts[m["category"]] += 1
-        bank_cat[(m["bank"], m["category"])] += 1
-
-    print(f"\nBy bank:")
-    for bank, count in sorted(bank_counts.items()):
-        print(f"  {bank}: {count} chunks")
-
-    print(f"\nBy category:")
-    for cat, count in sorted(cat_counts.items()):
-        print(f"  {cat}: {count} chunks")
-
-    print(f"\nBy bank × category:")
-    for (bank, cat), count in sorted(bank_cat.items()):
-        print(f"  {bank}/{cat}: {count} chunks")
-
-
-# ── CLI ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Build RAG knowledge base from scraped bank data"
-    )
-    parser.add_argument(
-        "--data-dir", default="data",
-        help="Directory containing scraped JSON files (default: data)"
-    )
-    parser.add_argument(
-        "--db-dir", default="chroma_db",
-        help="Directory for ChromaDB storage (default: chroma_db)"
-    )
-    parser.add_argument(
-        "--model", default=EMBEDDING_MODEL,
-        help=f"Embedding model name (default: {EMBEDDING_MODEL})"
-    )
+    load_dotenv()
+    setup_logging()
+
+    parser = argparse.ArgumentParser(description="Build RAG knowledge base")
+    parser.add_argument("--data-dir", default="data")
+    parser.add_argument("--db-dir", default="chroma_db")
+    parser.add_argument("--model", default=EMBEDDING_MODEL)
     args = parser.parse_args()
 
-    build_knowledge_base(args.data_dir, args.db_dir, args.model)
+    builder = KnowledgeBaseBuilder(args.data_dir, args.db_dir, args.model)
+    builder.build()
