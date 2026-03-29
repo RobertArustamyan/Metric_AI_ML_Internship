@@ -29,8 +29,8 @@ SYSTEM_PROMPT_TEMPLATE = (
     "- NEVER invent or guess numbers, rates, fees, or conditions.\n"
     "- If asked to compare banks, only compare using the data below.\n"
     "- IMPORTANT: Write ALL numbers as Armenian words, not digits. "
-    "For example: write 'տասdelays delays delays delays delays' instead of '12.5%', "
-    "'delays delays delays delays delays' instead of '500,000'. "
+    "For example: write 'տաս երկուս ու կես տոկոս' instead of '12.5%', "
+    "'հինգ հարյուր հազար դրամ' instead of '500,000'. "
     "This is critical because the voice system reads digits in English.\n\n"
 
     "BANK DATA:\n"
